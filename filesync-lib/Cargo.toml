@@ -1,0 +1,11 @@
+[package]
+name = "filesync-lib"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+base64 = { workspace = true }
+boringtun = { workspace = true }
+smoltcp = { workspace = true, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp", "log"] }
+tokio = { workspace = true, features = ["rt", "macros", "net", "time", "rt-multi-thread"] }
+anyhow = { workspace = true }
