@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["filesync","filesync-lib"]
+members = ["filesync","filesync-lib", "filesync-server"]
 
 [workspace.dependencies]
 tokio = "1.53.2"
