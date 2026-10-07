@@ -46,6 +46,7 @@ pub fn client_config(dir: &Path) -> Result<Arc<ClientConfig>> {
 pub struct TlsStream {
     vpn: VPN,
     conn: ClientConnection,
+    eof: bool,
 }
 impl TlsStream {
     pub async fn connect(
@@ -56,6 +57,7 @@ impl TlsStream {
         let mut s = Self {
             vpn,
             conn: ClientConnection::new(cfg, name)?,
+            eof: false,
         };
         let deadline = Instant::now() + Duration::from_secs(10);
         while s.conn.is_handshaking() {
@@ -66,24 +68,35 @@ impl TlsStream {
         }
         Ok(s)
     }
-    /// Move bytes between rustls and the TCP socket once.
-    async fn drive(&mut self) -> Result<()> {
+    async fn flush(&mut self) -> Result<()> {
         let mut out = Vec::new();
         while self.conn.wants_write() {
             self.conn.write_tls(&mut out)?;
         }
         if !out.is_empty() {
-            self.vpn.write(&out).await?;
+            self.vpn.write(&out).await?; // make sure this writes everything (write_all semantics)
         }
+        Ok(())
+    }
+
+    /// Move bytes between rustls and the TCP socket once.
+    async fn drive(&mut self) -> Result<()> {
+        self.flush().await?;
         if self.conn.wants_read() {
             let mut tmp = [0u8; 4096];
             match self.vpn.recv_some(&mut tmp).await? {
-                Some(0) => bail!("peer closed during TLS"),
+                Some(0) => {
+                    if self.conn.is_handshaking() {
+                        bail!("peer closed during TLS handshake");
+                    }
+                    // EOF after the handshake: let the caller decide what it means
+                    self.eof = true; // add a bool field
+                }
                 Some(n) => {
                     let mut rd = &tmp[..n];
                     while !rd.is_empty() {
                         self.conn.read_tls(&mut rd)?;
-                        self.conn.process_new_packets()?; // cert errors surface here
+                        self.conn.process_new_packets()?;
                     }
                 }
                 None => {}
@@ -94,7 +107,7 @@ impl TlsStream {
     pub async fn send(&mut self, data: &[u8]) -> Result<()> {
         self.conn.writer().write_all(data)?;
         while self.conn.wants_write() {
-            self.drive().await?;
+            self.flush().await?;
         }
         self.vpn.flush().await
     }
@@ -112,7 +125,7 @@ impl TlsStream {
     pub async fn close(&mut self) -> Result<()> {
         self.conn.send_close_notify();
         while self.conn.wants_write() {
-            self.drive().await?;
+            self.flush().await?;
         }
         self.vpn.close().await
     }
