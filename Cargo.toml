@@ -9,4 +9,5 @@ boringtun = "0.7.1"
 base64 = "0.23.1"
 anyhow = "1.0.104"
 dotenvy = "0.15.7"
+socket2 = "0.6.5"
 filesync-lib = { path = "filesync-lib" }

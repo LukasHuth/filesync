@@ -20,52 +20,6 @@ mod consts;
 mod helpers;
 mod queue_device;
 
-// async fn flush_tx(
-//     dev: &mut QueueDevice,
-//     tunn: &mut Tunn,
-//     udp: &UdpSocket,
-//     buf: &mut [u8],
-// ) -> Result<()> {
-//     while let Some(pkt) = dev.tx.pop_front() {
-//         match tunn.encapsulate(&pkt, buf) {
-//             TunnResult::WriteToNetwork(enc) => {
-//                 udp.send(enc).await?;
-//             }
-//             TunnResult::Err(e) => eprintln!("encapsulate error: {e:?}"),
-//             _ => {}
-//         }
-//     }
-//     Ok(())
-// }
-// async fn handle_incoming(
-//     datagram: &[u8],
-//     dev: &mut QueueDevice,
-//     tunn: &mut Tunn,
-//     udp: &UdpSocket,
-//     buf: &mut [u8],
-// ) -> Result<()> {
-//     let mut res = tunn.decapsulate(None, datagram, buf);
-//     loop {
-//         match res {
-//             TunnResult::WriteToNetwork(reply) => {
-//                 // handshake response / keepalive; then drain queued packets
-//                 udp.send(reply).await?;
-//                 res = tunn.decapsulate(None, &[], buf);
-//             }
-//             TunnResult::WriteToTunnelV4(plain, _) | TunnResult::WriteToTunnelV6(plain, _) => {
-//                 dev.rx.push_back(plain.to_vec());
-//                 break;
-//             }
-//             TunnResult::Done => break,
-//             TunnResult::Err(e) => {
-//                 eprintln!("decapsulate error: {e:?}");
-//                 break;
-//             }
-//         }
-//     }
-//     Ok(())
-// }
-
 pub struct VPNConfig {
     client_key: String,
     client_ip: Ipv4Address,
@@ -104,7 +58,12 @@ impl VPN {
         let private = StaticSecret::from(key32(&config.client_key)?);
         let server_pub = PublicKey::from(key32(&config.server_key)?);
         let tunn = Tunn::new(private, server_pub, None, Some(25), 0, None);
-        let udp = UdpSocket::bind("0.0.0.0:0").await?;
+        let usock = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, None)?;
+        usock.set_recv_buffer_size(4 << 20)?;
+        usock.set_send_buffer_size(4 << 20)?;
+        usock.set_nonblocking(true)?;
+        usock.bind(&"0.0.0.0:0".parse::<std::net::SocketAddr>()?.into())?;
+        let udp = UdpSocket::from_std(usock.into())?;
         // Android: call VpnService.protect() on this socket's fd if you ever
         // run this alongside a system VPN. Not needed for the in-process mode.
         udp.connect(format!("{}:{}", config.server_ip, config.server_port))
@@ -176,10 +135,12 @@ impl VPN {
 
         let mut sockets = SocketSet::new(vec![]);
         let tcp_handle = sockets.add(tcp::Socket::new(
-            tcp::SocketBuffer::new(vec![0u8; 16 * 1024]),
-            tcp::SocketBuffer::new(vec![0u8; 16 * 1024]),
+            tcp::SocketBuffer::new(vec![0u8; 1024 * 1024]), // 1MB buffer rx
+            tcp::SocketBuffer::new(vec![0u8; 1024 * 1024]), // 1MB buffer tx
         ));
-        sockets.get_mut::<tcp::Socket>(tcp_handle).connect(
+        let tcp_sock = sockets.get_mut::<tcp::Socket>(tcp_handle);
+        tcp_sock.set_congestion_control(tcp::CongestionControl::Cubic);
+        tcp_sock.connect(
             iface.context(),
             (
                 IpAddress::Ipv4(vpn_config.target_ip),
@@ -199,20 +160,53 @@ impl VPN {
     async fn pump(&mut self) -> Result<()> {
         self.poll_and_flush().await?;
 
+        let wait = self
+            .iface
+            .poll_delay(smol_now(self.start), &self.sockets)
+            .map(|d| Duration::from_micros(d.total_micros()))
+            .unwrap_or(Duration::from_millis(100))
+            .min(Duration::from_millis(100));
         let mut rx = [0u8; 2048];
         tokio::select! {
             r = self.udp.recv(&mut rx) => {
-                let n = r?;
-                self.handle_incoming(&rx[..n]).await?;
-            }
-            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+                match r {
+                    Ok(n) => self.handle_incoming(&rx[..n]).await?,
+                    Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {},
+                    Err(e) => return Err(e.into()),
+                }
+                for _ in 0..64 {
+                    match self.udp.try_recv(&mut rx) {
+                        Ok(n) => self.handle_incoming(&rx[..n]).await?,
+                        Err(_) => break,
+                    }
+                }
+            },
+            _ = tokio::time::sleep(wait) => {}
         }
-
         // handshake initiation, rekeying, keepalives
         if let TunnResult::WriteToNetwork(p) = self.tunn.update_timers(&mut self.buf) {
             self.udp.send(p).await?;
         }
         self.poll_and_flush().await
+    }
+    /// Wait until everything queued has been acked.
+    pub async fn flush(&mut self) -> Result<()> {
+        let mut last_q = self.sock().send_queue();
+        let mut last_progress = StdInstant::now();
+        while last_q > 0 {
+            if !self.sock().is_active() {
+                bail!("connection closed before data was acked");
+            }
+            self.pump().await?;
+            let q = self.sock().send_queue();
+            if q < last_q {
+                last_progress = StdInstant::now();
+            } else if last_progress.elapsed() > self.timeout {
+                bail!("stalled waiting for ack");
+            }
+            last_q = q;
+        }
+        Ok(())
     }
 
     async fn poll_and_flush(&mut self) -> Result<()> {
@@ -262,28 +256,30 @@ impl VPN {
         Ok(())
     }
     /// Send all of `data`; returns once the peer has acknowledged it.
-    pub async fn send(&mut self, mut data: &[u8]) -> Result<()> {
-        let deadline = StdInstant::now() + self.timeout;
+    pub async fn send(&mut self, data: &[u8]) -> Result<()> {
+        self.write(data).await?;
+        self.flush().await
+    }
+
+    /// Queue data; returns once it's in the tx buffer (not yet acked).
+    pub async fn write(&mut self, mut data: &[u8]) -> Result<()> {
+        let mut last_progress = StdInstant::now();
         while !data.is_empty() {
             let sock = self.sock();
             if !sock.may_send() {
-                bail!("connection closed");
+                bail!("connection closed")
             }
-            let n = sock.send_slice(data)?; // copies what fits in the tx buffer
+            let n = sock.send_slice(data)?;
             data = &data[n..];
-            self.pump().await?;
-            if StdInstant::now() > deadline {
-                bail!("send timed out");
+            if n > 0 {
+                last_progress = StdInstant::now();
+                self.poll_and_flush().await?;
+            } else {
+                if last_progress.elapsed() > self.timeout {
+                    bail!("send stalled")
+                }
+                self.pump().await?;
             }
-        }
-        while self.sock().send_queue() > 0 {
-            if !self.sock().is_active() {
-                bail!("connection closed before data was acked");
-            }
-            if StdInstant::now() > deadline {
-                bail!("send timed out waiting for ack");
-            }
-            self.pump().await?;
         }
         Ok(())
     }
@@ -301,6 +297,28 @@ impl VPN {
             }
             if StdInstant::now() > deadline {
                 bail!("recv timed out");
+            }
+            self.pump().await?;
+        }
+    }
+    pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let mut last_progress = StdInstant::now();
+        let mut used = 0;
+        loop {
+            let sock = self.sock();
+            if used >= buf.len() || !sock.may_recv() {
+                return Ok(used);
+            }
+            if sock.can_recv() {
+                let n = sock.recv_slice(&mut buf[used..])?;
+                self.poll_and_flush().await?;
+                if n > 0 {
+                    last_progress = StdInstant::now();
+                    used += n;
+                }
+            }
+            if last_progress.elapsed() > self.timeout {
+                bail!("read timed out")
             }
             self.pump().await?;
         }
