@@ -10,4 +10,8 @@ base64 = "0.23.1"
 anyhow = "1.0.104"
 dotenvy = "0.15.7"
 socket2 = "0.6.5"
+rustls = "0.23.45"
+rcgen = "0.14.10"
+time = "0.3.55"
+rustls-pemfile = "2.2.0"
 filesync-lib = { path = "filesync-lib" }

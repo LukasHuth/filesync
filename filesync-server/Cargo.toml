@@ -6,3 +6,7 @@ edition = "2024"
 [dependencies]
 tokio = { workspace = true, features = ["rt", "io-util"] }
 filesync-lib = { workspace = true }
+dotenvy = { workspace = true }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26.6", features = ["ring", "tls12"], default-features = false }
+rustls-pemfile = { workspace = true }

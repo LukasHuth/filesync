@@ -11,34 +11,45 @@ use smoltcp::{
 use std::time::{Duration, Instant as StdInstant};
 use tokio::net::UdpSocket;
 
-use crate::vpn::{
-    helpers::{key32, smol_now},
-    queue_device::QueueDevice,
+use crate::{
+    auth::CA,
+    vpn::{
+        helpers::{key32, smol_now},
+        queue_device::QueueDevice,
+    },
 };
 
 mod consts;
 mod helpers;
 mod queue_device;
+mod tls;
+use tls::TlsStream;
 
 pub struct VPNConfig {
-    client_key: String,
-    client_ip: Ipv4Address,
-    server_key: String,
-    server_ip: String,
-    server_port: u32,
-    target_ip: Ipv4Address,
-    target_port: u16,
+    pub(crate) client_key: String,
+    pub(crate) client_ip: Ipv4Address,
+    pub(crate) server_key: String,
+    pub(crate) server_ip: Ipv4Address,
+    pub(crate) server_port: u32,
+    pub(crate) target_ip: Ipv4Address,
+    pub(crate) target_port: u16,
+    pub(crate) tls_server_name: String, // e.g. "myserver.internal"; must match a SAN in server.pem
+    pub(crate) pki_dir: std::path::PathBuf,
 }
 impl VPNConfig {
     pub fn from_env() -> Result<Self> {
         Ok(Self {
             client_key: std::env::var("CLIENT_KEY")?,
             server_key: std::env::var("SERVER_KEY")?,
-            server_ip: std::env::var("SERVER_IP")?,
+            server_ip: std::env::var("SERVER_IP")?.parse()?,
             server_port: std::env::var("SERVER_PORT")?.parse()?,
             client_ip: std::env::var("CLIENT_IP")?.parse()?,
             target_ip: std::env::var("TARGET_IP")?.parse()?,
             target_port: std::env::var("TARGET_PORT")?.parse()?,
+            tls_server_name: std::env::var("TLS_SERVER_NAME")?,
+            pki_dir: std::env::var("PKI_DIR")
+                .unwrap_or_else(|_| "pki".into())
+                .into(),
         })
     }
 }
@@ -86,6 +97,13 @@ impl VPN {
         this.initial_handshake().await?;
 
         Ok(this)
+    }
+    pub async fn connect_tls(config: VPNConfig) -> Result<TlsStream> {
+        let cfg = tls::client_config(&config.pki_dir)?;
+        let name = rustls::pki_types::ServerName::try_from(config.tls_server_name.clone())?;
+
+        let vpn = VPN::new(config).await?; // WireGuard + TCP established
+        TlsStream::connect(vpn, cfg, name).await
     }
     async fn initial_handshake(&mut self) -> Result<()> {
         let deadline = StdInstant::now() + self.timeout;
@@ -284,6 +302,17 @@ impl VPN {
         Ok(())
     }
 
+    pub async fn recv_some(&mut self, buf: &mut [u8]) -> Result<Option<usize>> {
+        self.pump().await?;
+        let sock = self.sock();
+        if sock.can_recv() {
+            return Ok(Some(sock.recv_slice(buf)?));
+        }
+        if !sock.may_recv() {
+            return Ok(Some(0));
+        }
+        Ok(None)
+    }
     /// Read up to `buf.len()` bytes. Returns `Ok(0)` when the peer closed.
     pub async fn recv(&mut self, buf: &mut [u8]) -> Result<usize> {
         let deadline = StdInstant::now() + self.timeout;

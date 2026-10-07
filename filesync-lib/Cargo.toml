@@ -10,3 +10,7 @@ smoltcp = { workspace = true, features = ["std", "medium-ip", "proto-ipv4", "soc
 tokio = { workspace = true, features = ["rt", "macros", "net", "time", "rt-multi-thread"] }
 anyhow = { workspace = true }
 socket2 = { workspace = true }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring", "pem", "x509-parser"] }
+time = { workspace = true }
+rustls-pemfile = { workspace = true }
