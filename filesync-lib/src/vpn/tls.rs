@@ -1,18 +1,21 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use rustls::{
-    ClientConfig, ClientConnection, RootCertStore,
     pki_types::{CertificateDer, PrivateKeyDer, ServerName},
+    ClientConfig, ClientConnection, RootCertStore,
 };
 use rustls_pemfile::{certs, private_key};
 use std::{
     fs::File,
     io::{BufReader, Read as _, Write as _},
     path::Path,
+    pin::Pin,
     sync::Arc,
+    task::Poll,
     time::{Duration, Instant},
 };
+use tokio::io::AsyncWrite;
 
-use crate::vpn::VPN;
+use crate::vpn::{io_err, SockIo, VPN};
 
 pub fn client_config(dir: &Path) -> Result<Arc<ClientConfig>> {
     let ca_file = File::open(dir.join("ca.pem"))?;
@@ -128,5 +131,116 @@ impl TlsStream {
             self.flush().await?;
         }
         self.vpn.close().await
+    }
+    fn write_tls_to_tcp(&mut self) -> std::io::Result<()> {
+        while self.conn.wants_write() {
+            match self.conn.write_tls(&mut SockIo(self.vpn.sock())) {
+                Ok(_) => (),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+}
+impl tokio::io::AsyncRead for TlsStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        loop {
+            match this.conn.reader().read(buf.initialize_unfilled()) {
+                Ok(n) => {
+                    buf.advance(n);
+                    return Poll::Ready(Ok(()));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => (),
+                Err(e) => return Poll::Ready(Err(e)),
+            }
+
+            if let Err(e) = this.vpn.poll_pump(cx) {
+                return Poll::Ready(Err(e));
+            }
+            if let Err(e) = this.write_tls_to_tcp() {
+                return Poll::Ready(Err(e));
+            }
+
+            let mut progressed = false;
+            if this.conn.wants_read() {
+                match this.conn.read_tls(&mut SockIo(this.vpn.sock())) {
+                    Ok(_) => {
+                        if let Err(e) = this.conn.process_new_packets() {
+                            let _ = this.write_tls_to_tcp();
+                            this.vpn.poll_and_flush_sync();
+                            return Poll::Ready(Err(io_err(e)));
+                        }
+                        progressed = true;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => (),
+                    Err(e) => return Poll::Ready(Err(e)),
+                }
+            }
+            let _ = this.write_tls_to_tcp();
+            this.vpn.poll_and_flush_sync();
+
+            if !progressed {
+                return Poll::Pending;
+            }
+        }
+    }
+}
+
+impl AsyncWrite for TlsStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        this.vpn.poll_pump(cx)?;
+        this.write_tls_to_tcp()?;
+
+        let n = this.conn.writer().write(buf)?;
+        if n == 0 && !buf.is_empty() {
+            return Poll::Pending;
+        }
+        this.write_tls_to_tcp()?;
+        this.vpn.poll_and_flush_sync();
+        Poll::Ready(Ok(n))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        this.vpn.poll_pump(cx)?;
+        this.write_tls_to_tcp()?;
+        this.vpn.poll_and_flush_sync();
+        if this.conn.wants_write() || this.vpn.sock().send_queue() > 0 {
+            Poll::Pending
+        } else {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = &mut *self;
+        this.conn.send_close_notify();
+        if let Poll::Pending = Pin::new(&mut *this).poll_flush(cx) {
+            return Poll::Pending;
+        }
+        this.vpn.sock().close();
+        this.vpn.poll_pump(cx)?;
+        if this.vpn.sock().is_active() {
+            Poll::Pending
+        } else {
+            Poll::Ready(Ok(()))
+        }
     }
 }

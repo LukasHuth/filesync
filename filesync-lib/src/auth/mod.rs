@@ -23,17 +23,15 @@ impl CA {
     pub fn setup(dir: &Path, server_name: &str, server_ip: IpAddr) -> Result<()> {
         let ca = Self::load_or_create(dir)?;
 
-        if !dir.join("client.pem").exists() {
-            let (c, k) = ca.issue_as_string("my-client", None, false)?;
-            std::fs::write(dir.join("client.pem"), c)?;
-            write_private(&dir.join("client.key"), &k)?;
-        }
         if !dir.join("server.pem").exists() {
             let (c, k) = ca.issue_as_string(server_name, Some(server_ip), true)?;
             std::fs::write(dir.join("server.pem"), c)?;
             write_private(&dir.join("server.key"), &k)?;
         }
         Ok(())
+    }
+    pub fn load_or_create_with_config(config: &VPNConfig) -> Result<Self> {
+        Self::load_or_create(&config.pki_dir)
     }
     /// Load the CA from `dir`, or create and persist it on first run.
     pub fn load_or_create(dir: &Path) -> Result<Self> {
@@ -61,6 +59,17 @@ impl CA {
 
         let issuer = Issuer::new(params, key);
         Ok(Self { issuer })
+    }
+    pub fn save_cert_and_key(
+        config: &VPNConfig,
+        cert: String,
+        key: String,
+        file_name: &str,
+    ) -> Result<()> {
+        let dir = &config.pki_dir;
+        std::fs::write(dir.join(format!("{file_name}.pem")), cert)?;
+        write_private(&dir.join(format!("{file_name}.key")), &key)?;
+        Ok(())
     }
     /// Issue a leaf cert. Returns (cert_pem, key_pem)
     pub fn issue_as_string(

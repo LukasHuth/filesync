@@ -7,10 +7,11 @@ edition = "2024"
 base64 = { workspace = true }
 boringtun = { workspace = true }
 smoltcp = { workspace = true, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp", "log", "socket-tcp-cubic"] }
-tokio = { workspace = true, features = ["rt", "macros", "net", "time", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt", "macros", "net", "time", "rt-multi-thread", "io-util"] }
 anyhow = { workspace = true }
 socket2 = { workspace = true }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring", "pem", "x509-parser"] }
 time = { workspace = true }
 rustls-pemfile = { workspace = true }
+sha2 = "0.11.0"

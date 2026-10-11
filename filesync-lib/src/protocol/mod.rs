@@ -1,19 +1,9 @@
-pub trait ServerSidePacketUtils {
-    fn read(&mut self) -> impl Future<Output = Option<ServerBoundPacket>>;
-    fn write(
-        &mut self,
-        packet: ClientBoundPacket,
-    ) -> impl Future<Output = Result<(), Box<dyn std::error::Error>>>;
-}
-pub trait ClientSidePacketUtils {
-    fn read(&mut self) -> impl Future<Output = Option<ClientBoundPacket>>;
-    fn write(
-        &mut self,
-        packet: ServerBoundPacket,
-    ) -> impl Future<Output = Result<(), Box<dyn std::error::Error>>>;
-}
-pub enum ServerBoundPacket {
-    Authenticate {
-    }
-}
-pub enum ClientBoundPacket {}
+mod clientbound;
+pub use clientbound::*;
+mod serverbound;
+pub use serverbound::*;
+mod util;
+mod internal_traits;
+use internal_traits::*;
+mod traits;
+pub use traits::*;

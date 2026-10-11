@@ -72,7 +72,9 @@ async fn client_handling(acceptor: TlsAcceptor, stream: TcpStream) -> Result<(),
     // TLS handshake; fails here if the client cert is missing or untrusted
     let tls = acceptor.accept(stream).await?;
 
-    let reader = BufReader::new(tls);
+    let (read_half, mut write_half) = tokio::io::split(tls);
+
+    let reader = BufReader::new(read_half);
     let mut lines = reader.lines();
     while let Some(line) = lines.next_line().await? {
         println!("Received: {line}");

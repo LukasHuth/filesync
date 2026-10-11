@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 use boringtun::{
     noise::{Tunn, TunnResult},
     x25519::{PublicKey, StaticSecret},
@@ -8,7 +8,9 @@ use smoltcp::{
     socket::tcp,
     wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address},
 };
-use std::time::{Duration, Instant as StdInstant};
+use std::{
+    pin::Pin, task::Context, time::{Duration, Instant as StdInstant}
+};
 use tokio::net::UdpSocket;
 
 use crate::{
@@ -22,7 +24,7 @@ use crate::{
 mod consts;
 mod helpers;
 mod queue_device;
-mod tls;
+pub(crate) mod tls;
 use tls::TlsStream;
 
 pub struct VPNConfig {
@@ -59,6 +61,7 @@ pub struct VPN {
     dev: QueueDevice,
     iface: Interface,
     sockets: SocketSet<'static>,
+    timer: Pin<Box<tokio::time::Sleep>>,
     handle: SocketHandle,
     start: StdInstant,
     timeout: Duration,
@@ -92,6 +95,7 @@ impl VPN {
             start,
             timeout: Duration::from_secs(5),
             buf: vec![0u8; 2048],
+            timer: Box::pin(tokio::time::sleep(Duration::ZERO))
         };
 
         this.initial_handshake().await?;
@@ -351,5 +355,103 @@ impl VPN {
             }
             self.pump().await?;
         }
+    }
+
+    pub(crate) fn poll_pump(&mut self, cx: &mut Context<'_>) -> std::io::Result<()> {
+        let mut rx = [0u8; 2048];
+        loop {
+            let mut rb = tokio::io::ReadBuf::new(&mut rx);
+            use std::task::Poll;
+            match self.udp.poll_recv(cx, &mut rb) {
+                Poll::Ready(Ok(())) => {
+                    let d = rb.filled().to_vec();
+                    self.handle_incoming(&d);
+                }
+                Poll::Ready(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    continue
+                }
+                Poll::Ready(Err(e)) => return Err(e),
+                Poll::Pending => break,
+            }
+        }
+
+        if let TunnResult::WriteToNetwork(p) = self.tunn.update_timers(&mut self.buf) {
+            let _ = self.udp.try_send(p);
+        }
+
+        self.poll_and_flush_sync();
+
+        let wait = self
+            .iface
+            .poll_delay(smol_now(self.start), &self.sockets)
+            .map(|d| Duration::from_micros(d.total_micros()))
+            .unwrap_or(Duration::from_millis(100))
+            .min(Duration::from_millis(100));
+        self.timer.as_mut().reset(tokio::time::Instant::now() + wait);
+        if self.timer.as_mut().poll(cx).is_ready() {
+            cx.waker().wake_by_ref();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn poll_and_flush_sync(&mut self) {
+        self.iface.poll(smol_now(self.start), &mut self.dev, &mut self.sockets);
+        while let Some(pkt) = self.dev.tx.pop_front() {
+            if let TunnResult::WriteToNetwork(enc) = self.tunn.encapsulate(&pkt, &mut self.buf) {
+                let _ = self.udp.try_send(enc);
+            }
+        }
+    }
+
+    fn handle_incoming_sync(&mut self, datagram: &[u8]) {
+        let mut res = self.tunn.decapsulate(None, datagram, &mut self.buf);
+        loop {
+            match res {
+                TunnResult::WriteToNetwork(reply) => {
+                    let _ = self.udp.try_send(reply);
+                    res = self.tunn.decapsulate(None, &[], &mut self.buf);
+                },
+                TunnResult::WriteToTunnelV4(p,_ ) | TunnResult::WriteToTunnelV6(p, _) => {
+                    self.dev.rx.push_back(p.to_vec());
+                    return;
+                }
+                TunnResult::Done => return,
+                TunnResult::Err(e) => { eprintln!("decapsulate error: {e:?}"); return; }
+            }
+        }
+    }
+}
+
+struct SockIo<'a>(&'a mut tcp::Socket<'static>);
+
+fn io_err<E: Into<Box<dyn std::error::Error + Send + Sync>>>(e: E) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Other, e)
+}
+
+impl std::io::Read for SockIo<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.0.can_recv() {
+            self.0.recv_slice(buf).map_err(io_err)
+        } else if !self.0.may_recv() {
+            Ok(0)
+        } else {
+            Err(std::io::ErrorKind::WouldBlock.into())
+        }
+    }
+}
+
+impl std::io::Write for SockIo<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if !self.0.may_send() {
+            return Err(std::io::ErrorKind::BrokenPipe.into());
+        }
+        match self.0.send_slice(buf).map_err(io_err)? {
+            0 => Err(std::io::ErrorKind::WouldBlock.into()),
+            n => Ok(n),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
