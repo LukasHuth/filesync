@@ -2,14 +2,17 @@ use tokio::io::{
     AsyncBufRead, AsyncBufReadExt as _, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _,
 };
 
-use crate::protocol::{internal_traits::PacketData, ClientBoundPacket, ServerBoundPacket};
+use crate::protocol::{ClientBoundPacket, ServerBoundPacket, internal_traits::PacketData};
 
 pub trait PacketUtilsIn<T: PacketData> {
     fn read_packet(&mut self) -> impl Future<Output = std::io::Result<Option<T>>>;
 }
 
 pub trait PacketUtilsOut<T: PacketData> {
-    fn write_packet(&mut self, packet: T) -> impl Future<Output = Result<(), Box<dyn std::error::Error>>>;
+    fn write_packet(
+        &mut self,
+        packet: T,
+    ) -> impl Future<Output = Result<(), Box<dyn std::error::Error>>>;
 }
 
 pub trait ServerSidePacketUtils:
@@ -50,7 +53,7 @@ where
             if len > MAX_PACKET {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "packet too large",
+                    format!("packet too large {len} {MAX_PACKET}"),
                 ));
             }
             let total = HDR + len as usize;
@@ -80,7 +83,7 @@ where
         if len > MAX_PACKET {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "packet too large",
+                format!("packet too large {len} {MAX_PACKET}"),
             ));
         }
 
