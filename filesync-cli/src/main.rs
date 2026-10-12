@@ -1,4 +1,4 @@
-use clap::{command, Parser};
+use clap::Parser;
 use filesync_lib::{auth::CA, vpn::VPNConfig};
 
 #[derive(Parser, Debug)]

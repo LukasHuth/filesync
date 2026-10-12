@@ -1,5 +1,6 @@
 use crate::protocol::{ExtendPacketData as _, PacketData, PartiallyExtendablePacketData as _};
 
+#[derive(Debug)]
 pub enum ClientBoundPacket {
     AvailableFiles {
         revision: u64,
@@ -39,7 +40,7 @@ impl PacketData for ClientBoundPacket {
 
     fn from_bytes(bytes: &[u8]) -> Option<(Self, usize)> {
         let mut offset = 0;
-        let id = bytes.load_data(&mut offset).ok()?;
+        let id: u8 = bytes.load_data(&mut offset).ok()?;
         match id {
             0x00 => {
                 let message = bytes.load_data(&mut offset).ok()?;

@@ -1,6 +1,10 @@
 use std::{fs::File, io::BufReader as StdBufReader, path::Path, sync::Arc};
 
-use filesync_lib::{auth::CA, vpn::VPNConfig};
+use filesync_lib::{
+    auth::CA,
+    protocol::{PacketUtilsIn, ServerBoundPacket},
+    vpn::VPNConfig,
+};
 use rustls::{
     RootCertStore, ServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer},
@@ -8,18 +12,21 @@ use rustls::{
 };
 use rustls_pemfile::{certs, private_key};
 use tokio::{
-    io::{AsyncBufReadExt as _, BufReader},
+    io::BufReader,
     net::{TcpListener, TcpStream},
 };
 use tokio_rustls::TlsAcceptor;
+
+use crate::functions::HandlePacket as _;
 
 type BoxErr = Box<dyn std::error::Error>;
 #[tokio::main]
 async fn main() -> Result<(), BoxErr> {
     let acceptor = tls_acceptor(Path::new("pki"))?;
-    let listener = TcpListener::bind("10.9.0.2:8088").await?;
     dotenvy::dotenv()?;
     let config = VPNConfig::from_env()?;
+    let listener =
+        TcpListener::bind(&format!("{}:{}", config.target_ip, config.target_port)).await?;
     CA::setup_with_config(config)?;
     loop {
         let (stream, addr) = listener.accept().await?;
@@ -68,16 +75,40 @@ fn tls_acceptor(dir: &Path) -> Result<TlsAcceptor, BoxErr> {
     Ok(TlsAcceptor::from(Arc::new(cfg)))
 }
 
+type ExpBufReader = BufReader<tokio::io::ReadHalf<tokio_rustls::server::TlsStream<TcpStream>>>;
+type ExpWriter = tokio::io::WriteHalf<tokio_rustls::server::TlsStream<TcpStream>>;
 async fn client_handling(acceptor: TlsAcceptor, stream: TcpStream) -> Result<(), BoxErr> {
     // TLS handshake; fails here if the client cert is missing or untrusted
     let tls = acceptor.accept(stream).await?;
 
     let (read_half, mut write_half) = tokio::io::split(tls);
 
-    let reader = BufReader::new(read_half);
-    let mut lines = reader.lines();
-    while let Some(line) = lines.next_line().await? {
-        println!("Received: {line}");
+    let mut reader: ExpBufReader = BufReader::new(read_half);
+    while let Some(packet) =
+        <ExpBufReader as PacketUtilsIn<ServerBoundPacket>>::read_packet(&mut reader).await?
+    {
+        PacketHandler::handle_packet(packet, &mut reader, &mut write_half).await?;
     }
     Ok(())
 }
+struct PacketHandler;
+impl functions::HandlePacket for PacketHandler {
+    async fn handle_packet(
+        packet: ServerBoundPacket,
+        reader: &mut ExpBufReader,
+        writer: &mut ExpWriter,
+    ) -> Result<(), BoxErr> {
+        match packet {
+            ServerBoundPacket::DebugMessage { .. } => {
+                functions::debug_message::DebugMessage::handle_packet(packet, reader, writer).await
+            }
+            ServerBoundPacket::GetAvailableFiles => {
+                functions::get_available_files::GetAvailableFiles::handle_packet(
+                    packet, reader, writer,
+                )
+                .await
+            }
+        }
+    }
+}
+mod functions;

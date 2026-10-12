@@ -2,14 +2,19 @@ use tokio::io::{
     AsyncBufRead, AsyncBufReadExt as _, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _,
 };
 
-use crate::protocol::{internal_traits::PacketData, ClientBoundPacket, ServerBoundPacket};
+use crate::protocol::{ClientBoundPacket, ServerBoundPacket, internal_traits::PacketData};
 
+#[allow(private_bounds)]
 pub trait PacketUtilsIn<T: PacketData> {
-    fn read(&mut self) -> impl Future<Output = std::io::Result<Option<T>>>;
+    fn read_packet(&mut self) -> impl Future<Output = std::io::Result<Option<T>>>;
 }
 
+#[allow(private_bounds)]
 pub trait PacketUtilsOut<T: PacketData> {
-    fn write(&mut self, packet: T) -> impl Future<Output = Result<(), Box<dyn std::error::Error>>>;
+    fn write_packet(
+        &mut self,
+        packet: T,
+    ) -> impl Future<Output = Result<(), Box<dyn std::error::Error>>>;
 }
 
 pub trait ServerSidePacketUtils:
@@ -34,7 +39,7 @@ where
     P: PacketData,
 {
     /// Ok(None) = clean EOF at a packet boundary.
-    async fn read(&mut self) -> std::io::Result<Option<P>> {
+    async fn read_packet(&mut self) -> std::io::Result<Option<P>> {
         // Fast path: the whole packet is already in the BufReader's buffer.
         let buf = self.fill_buf().await?;
         if buf.is_empty() {
@@ -50,7 +55,7 @@ where
             if len > MAX_PACKET {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "packet too large",
+                    format!("packet too large {len} {MAX_PACKET}"),
                 ));
             }
             let total = HDR + len as usize;
@@ -58,12 +63,12 @@ where
                 let parsed = P::from_bytes(&buf[..total]);
                 return match parsed {
                     Some((packet, used)) => {
-                        self.consume(used); // `buf` borrow has ended
+                        self.consume(used + HDR); // `buf` borrow has ended
                         Ok(Some(packet))
                     }
                     None => Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        "malformed packet",
+                        format!("malformed packet (1) (data: {:?})", &buf[..total]),
                     )),
                 };
             }
@@ -80,7 +85,7 @@ where
         if len > MAX_PACKET {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "packet too large",
+                format!("packet too large {len} {MAX_PACKET}"),
             ));
         }
 
@@ -90,7 +95,9 @@ where
 
         P::from_bytes(&full)
             .map(|(packet, _)| Some(packet))
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed packet"))
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed packet (2)")
+            })
     }
 }
 
@@ -115,7 +122,7 @@ where
     T: AsyncWrite + Unpin,
     T0: PacketData,
 {
-    async fn write(&mut self, packet: T0) -> Result<(), Box<dyn std::error::Error>> {
+    async fn write_packet(&mut self, packet: T0) -> Result<(), Box<dyn std::error::Error>> {
         let data = packet
             .to_bytes()
             .ok_or(PacketUtilsOutError::FailedToConvertToBytes)?;

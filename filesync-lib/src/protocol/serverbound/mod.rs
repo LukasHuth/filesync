@@ -2,6 +2,7 @@ use crate::protocol::internal_traits::{
     ExtendPacketData as _, PacketData, PartiallyExtendablePacketData as _,
 };
 
+#[derive(Debug)]
 pub enum ServerBoundPacket {
     DebugMessage { message: String },
     GetAvailableFiles,
