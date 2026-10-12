@@ -4,10 +4,12 @@ use tokio::io::{
 
 use crate::protocol::{ClientBoundPacket, ServerBoundPacket, internal_traits::PacketData};
 
+#[allow(private_bounds)]
 pub trait PacketUtilsIn<T: PacketData> {
     fn read_packet(&mut self) -> impl Future<Output = std::io::Result<Option<T>>>;
 }
 
+#[allow(private_bounds)]
 pub trait PacketUtilsOut<T: PacketData> {
     fn write_packet(
         &mut self,
@@ -66,7 +68,7 @@ where
                     }
                     None => Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        "malformed packet",
+                        format!("malformed packet (1) (data: {:?})", &buf[..total]),
                     )),
                 };
             }
@@ -93,7 +95,9 @@ where
 
         P::from_bytes(&full)
             .map(|(packet, _)| Some(packet))
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed packet"))
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed packet (2)")
+            })
     }
 }
 

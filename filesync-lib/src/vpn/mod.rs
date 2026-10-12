@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, bail};
 use boringtun::{
     noise::{Tunn, TunnResult},
     x25519::{PublicKey, StaticSecret},
@@ -9,16 +9,15 @@ use smoltcp::{
     wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address},
 };
 use std::{
-    pin::Pin, task::Context, time::{Duration, Instant as StdInstant}
+    pin::Pin,
+    task::Context,
+    time::{Duration, Instant as StdInstant},
 };
 use tokio::net::UdpSocket;
 
-use crate::{
-    auth::CA,
-    vpn::{
-        helpers::{key32, smol_now},
-        queue_device::QueueDevice,
-    },
+use crate::vpn::{
+    helpers::{key32, smol_now},
+    queue_device::QueueDevice,
 };
 
 mod consts;
@@ -33,8 +32,8 @@ pub struct VPNConfig {
     pub(crate) server_key: String,
     pub(crate) server_ip: Ipv4Address,
     pub(crate) server_port: u32,
-    pub(crate) target_ip: Ipv4Address,
-    pub(crate) target_port: u16,
+    pub target_ip: Ipv4Address,
+    pub target_port: u16,
     pub(crate) tls_server_name: String, // e.g. "myserver.internal"; must match a SAN in server.pem
     pub(crate) pki_dir: std::path::PathBuf,
 }
@@ -95,7 +94,7 @@ impl VPN {
             start,
             timeout: Duration::from_secs(5),
             buf: vec![0u8; 2048],
-            timer: Box::pin(tokio::time::sleep(Duration::ZERO))
+            timer: Box::pin(tokio::time::sleep(Duration::ZERO)),
         };
 
         this.initial_handshake().await?;
@@ -365,10 +364,10 @@ impl VPN {
             match self.udp.poll_recv(cx, &mut rb) {
                 Poll::Ready(Ok(())) => {
                     let d = rb.filled().to_vec();
-                    self.handle_incoming(&d);
+                    self.handle_incoming_sync(&d);
                 }
                 Poll::Ready(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
-                    continue
+                    continue;
                 }
                 Poll::Ready(Err(e)) => return Err(e),
                 Poll::Pending => break,
@@ -387,7 +386,9 @@ impl VPN {
             .map(|d| Duration::from_micros(d.total_micros()))
             .unwrap_or(Duration::from_millis(100))
             .min(Duration::from_millis(100));
-        self.timer.as_mut().reset(tokio::time::Instant::now() + wait);
+        self.timer
+            .as_mut()
+            .reset(tokio::time::Instant::now() + wait);
         if self.timer.as_mut().poll(cx).is_ready() {
             cx.waker().wake_by_ref();
         }
@@ -395,7 +396,8 @@ impl VPN {
     }
 
     pub(crate) fn poll_and_flush_sync(&mut self) {
-        self.iface.poll(smol_now(self.start), &mut self.dev, &mut self.sockets);
+        self.iface
+            .poll(smol_now(self.start), &mut self.dev, &mut self.sockets);
         while let Some(pkt) = self.dev.tx.pop_front() {
             if let TunnResult::WriteToNetwork(enc) = self.tunn.encapsulate(&pkt, &mut self.buf) {
                 let _ = self.udp.try_send(enc);
@@ -410,13 +412,16 @@ impl VPN {
                 TunnResult::WriteToNetwork(reply) => {
                     let _ = self.udp.try_send(reply);
                     res = self.tunn.decapsulate(None, &[], &mut self.buf);
-                },
-                TunnResult::WriteToTunnelV4(p,_ ) | TunnResult::WriteToTunnelV6(p, _) => {
+                }
+                TunnResult::WriteToTunnelV4(p, _) | TunnResult::WriteToTunnelV6(p, _) => {
                     self.dev.rx.push_back(p.to_vec());
                     return;
                 }
                 TunnResult::Done => return,
-                TunnResult::Err(e) => { eprintln!("decapsulate error: {e:?}"); return; }
+                TunnResult::Err(e) => {
+                    eprintln!("decapsulate error: {e:?}");
+                    return;
+                }
             }
         }
     }

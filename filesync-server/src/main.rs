@@ -2,9 +2,7 @@ use std::{fs::File, io::BufReader as StdBufReader, path::Path, sync::Arc};
 
 use filesync_lib::{
     auth::CA,
-    protocol::{
-        ClientBoundPacket, PacketUtilsIn, PacketUtilsOut, ServerBoundPacket, ServerSidePacketUtils,
-    },
+    protocol::{PacketUtilsIn, ServerBoundPacket},
     vpn::VPNConfig,
 };
 use rustls::{
@@ -14,7 +12,7 @@ use rustls::{
 };
 use rustls_pemfile::{certs, private_key};
 use tokio::{
-    io::{AsyncBufReadExt as _, BufReader},
+    io::BufReader,
     net::{TcpListener, TcpStream},
 };
 use tokio_rustls::TlsAcceptor;
@@ -25,9 +23,10 @@ type BoxErr = Box<dyn std::error::Error>;
 #[tokio::main]
 async fn main() -> Result<(), BoxErr> {
     let acceptor = tls_acceptor(Path::new("pki"))?;
-    let listener = TcpListener::bind("10.9.0.2:8088").await?;
     dotenvy::dotenv()?;
     let config = VPNConfig::from_env()?;
+    let listener =
+        TcpListener::bind(&format!("{}:{}", config.target_ip, config.target_port)).await?;
     CA::setup_with_config(config)?;
     loop {
         let (stream, addr) = listener.accept().await?;
