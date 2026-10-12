@@ -1,4 +1,5 @@
 use filesync_lib::protocol::{ClientBoundPacket, PacketUtilsOut as _, ServerBoundPacket};
+use tokio::io::AsyncWriteExt as _;
 
 use crate::functions::HandlePacket;
 
@@ -15,7 +16,9 @@ impl HandlePacket for DebugMessage {
             );
         };
         println!("Debug Message: {message}");
-        Self::send("Pong!".to_string(), writer).await
+        Self::send("Pong!".to_string(), writer).await?;
+        writer.flush().await?;
+        Ok(())
     }
 }
 impl DebugMessage {
