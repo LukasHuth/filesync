@@ -9,6 +9,8 @@ SERVER_PORT=<wireguard port>
 SERVER_IP="<server ip>"
 TARGET_IP="<file server ip in vpn network>"
 TARGET_PORT=<file server port>
+TLS_SERVER_NAME=<file server internal name, default: filesync.internal>
+DATABASE_URL=<sqlitedb_path>
 ```
 
 ## get keys

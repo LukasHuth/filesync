@@ -1,0 +1,8 @@
+[package]
+name = "filesync-server-db"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+diesel = { workspace = true, features = ["sqlite", "returning_clauses_for_sqlite_3_35", "r2d2"] }
+dotenvy = { workspace = true }
