@@ -5,11 +5,11 @@ use tokio::io::{
 use crate::protocol::{internal_traits::PacketData, ClientBoundPacket, ServerBoundPacket};
 
 pub trait PacketUtilsIn<T: PacketData> {
-    fn read(&mut self) -> impl Future<Output = std::io::Result<Option<T>>>;
+    fn read_packet(&mut self) -> impl Future<Output = std::io::Result<Option<T>>>;
 }
 
 pub trait PacketUtilsOut<T: PacketData> {
-    fn write(&mut self, packet: T) -> impl Future<Output = Result<(), Box<dyn std::error::Error>>>;
+    fn write_packet(&mut self, packet: T) -> impl Future<Output = Result<(), Box<dyn std::error::Error>>>;
 }
 
 pub trait ServerSidePacketUtils:
@@ -34,7 +34,7 @@ where
     P: PacketData,
 {
     /// Ok(None) = clean EOF at a packet boundary.
-    async fn read(&mut self) -> std::io::Result<Option<P>> {
+    async fn read_packet(&mut self) -> std::io::Result<Option<P>> {
         // Fast path: the whole packet is already in the BufReader's buffer.
         let buf = self.fill_buf().await?;
         if buf.is_empty() {
@@ -115,7 +115,7 @@ where
     T: AsyncWrite + Unpin,
     T0: PacketData,
 {
-    async fn write(&mut self, packet: T0) -> Result<(), Box<dyn std::error::Error>> {
+    async fn write_packet(&mut self, packet: T0) -> Result<(), Box<dyn std::error::Error>> {
         let data = packet
             .to_bytes()
             .ok_or(PacketUtilsOutError::FailedToConvertToBytes)?;

@@ -1,5 +1,6 @@
 use crate::protocol::{ExtendPacketData as _, PacketData, PartiallyExtendablePacketData as _};
 
+#[derive(Debug)]
 pub struct AvailableFile {
     pub name: String,
     pub hash: String,

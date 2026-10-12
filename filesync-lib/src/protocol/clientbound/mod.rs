@@ -1,5 +1,6 @@
 use crate::protocol::{ExtendPacketData as _, PacketData, PartiallyExtendablePacketData as _};
 
+#[derive(Debug)]
 pub enum ClientBoundPacket {
     AvailableFiles {
         revision: u64,
