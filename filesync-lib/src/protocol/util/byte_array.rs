@@ -36,7 +36,7 @@ impl PartiallyExtendablePacketData for &[u8] {
     {
         let size =
             u64::from_le_bytes(self[0..size_of::<u64>()].try_into().map_err(|_| ())?) as usize;
-        if size >= *offset {
+        if *offset > size {
             return Err(());
         }
         T::from_bytes(&self[*offset + size_of::<u64>()..])
