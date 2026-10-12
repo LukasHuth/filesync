@@ -61,7 +61,7 @@ where
                 let parsed = P::from_bytes(&buf[..total]);
                 return match parsed {
                     Some((packet, used)) => {
-                        self.consume(used); // `buf` borrow has ended
+                        self.consume(used + HDR); // `buf` borrow has ended
                         Ok(Some(packet))
                     }
                     None => Err(std::io::Error::new(
